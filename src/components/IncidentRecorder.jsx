@@ -1,40 +1,55 @@
 import { useState, useRef } from 'react'
-import { Mic, Square, Save, MapPin, Clock } from 'lucide-react'
+import { Mic, Square, Save, MapPin, Clock, Upload, AlertCircle } from 'lucide-react'
 import { useLanguage } from '../contexts/LanguageContext'
 import { useUser } from '../contexts/UserContext'
+import { recordingStorageService } from '../services/pinataService.js'
+import { locationDetectionService } from '../services/locationService.js'
 import InfoCard from './InfoCard'
 import RecordButton from './RecordButton'
 
 const IncidentRecorder = () => {
   const { t } = useLanguage()
-  const { user, addEncounter } = useUser()
+  const { user, addEncounter, canCreateEncounter, hasPremiumAccess, apiConfigValid } = useUser()
   const [isRecording, setIsRecording] = useState(false)
   const [recordedBlob, setRecordedBlob] = useState(null)
   const [recordingTime, setRecordingTime] = useState(0)
   const [location, setLocation] = useState(null)
   const [notes, setNotes] = useState('')
   const [encounterType, setEncounterType] = useState('traffic-stop')
+  const [isUploading, setIsUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [error, setError] = useState(null)
   
   const mediaRecorder = useRef(null)
   const timerRef = useRef(null)
 
   const startRecording = async () => {
     try {
-      // Get location
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            setLocation({
-              lat: position.coords.latitude,
-              lng: position.coords.longitude,
-              address: `${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)}`
-            })
-          },
-          (error) => {
-            console.error('Location error:', error)
-            setLocation({ address: 'Location unavailable' })
-          }
-        )
+      setError(null)
+      
+      // Check if user can create encounters
+      if (!canCreateEncounter()) {
+        setError('You have reached the free plan limit. Upgrade to Premium for unlimited recordings.')
+        return
+      }
+
+      // Get location using enhanced location service
+      try {
+        const locationResult = await locationDetectionService.getCurrentLocation()
+        if (locationResult.success) {
+          setLocation({
+            lat: locationResult.data.latitude,
+            lng: locationResult.data.longitude,
+            address: locationResult.data.address?.formattedAddress || 
+                    `${locationResult.data.latitude.toFixed(4)}, ${locationResult.data.longitude.toFixed(4)}`,
+            accuracy: locationResult.data.accuracy
+          })
+        } else {
+          setLocation({ address: 'Location unavailable' })
+        }
+      } catch (locationError) {
+        console.error('Location error:', locationError)
+        setLocation({ address: 'Location unavailable' })
       }
 
       // Start media recording
@@ -83,27 +98,85 @@ const IncidentRecorder = () => {
     }
   }
 
-  const saveEncounter = () => {
-    if (user.subscriptionStatus === 'free' && user.encounters?.length >= 1) {
-      alert('Free plan allows only 1 saved encounter. Upgrade to Premium for unlimited storage.')
+  const saveEncounter = async () => {
+    if (!recordedBlob && !notes.trim()) {
+      setError('Please record something or add notes before saving.')
       return
     }
 
-    const encounter = {
-      type: encounterType,
-      location: location?.address || 'Unknown location',
-      notes: notes,
-      recordingUrl: recordedBlob ? URL.createObjectURL(recordedBlob) : null
+    if (!canCreateEncounter()) {
+      setError('Free plan allows only 1 saved encounter. Upgrade to Premium for unlimited storage.')
+      return
     }
 
-    addEncounter(encounter)
-    
-    // Reset form
-    setRecordedBlob(null)
-    setNotes('')
-    setRecordingTime(0)
-    
-    alert('Encounter saved successfully!')
+    try {
+      setIsUploading(true)
+      setUploadProgress(0)
+      let recordingUrl = null
+
+      // Upload recording to IPFS if available and user has premium or API is configured
+      if (recordedBlob && (hasPremiumAccess() || apiConfigValid)) {
+        setUploadProgress(25)
+        
+        const encounterData = {
+          encounterId: Date.now().toString(),
+          userId: user.userId,
+          timestamp: new Date().toISOString(),
+          location: location?.address || 'Unknown location',
+          type: encounterType,
+          duration: recordingTime
+        }
+
+        const uploadResult = await recordingStorageService.storeRecording(recordedBlob, encounterData)
+        
+        if (uploadResult.success) {
+          recordingUrl = uploadResult.data.recordingUrl
+          setUploadProgress(75)
+        } else {
+          console.error('Failed to upload recording:', uploadResult.error)
+          // Continue with local storage for free users
+          recordingUrl = URL.createObjectURL(recordedBlob)
+        }
+      } else if (recordedBlob) {
+        // Use local blob URL for free users or when API is not configured
+        recordingUrl = URL.createObjectURL(recordedBlob)
+      }
+
+      setUploadProgress(90)
+
+      const encounter = {
+        type: encounterType,
+        location: location?.address || 'Unknown location',
+        notes: notes.trim(),
+        recordingUrl: recordingUrl,
+        duration: recordingTime,
+        coordinates: location ? { lat: location.lat, lng: location.lng } : null,
+        accuracy: location?.accuracy || null
+      }
+
+      const result = await addEncounter(encounter)
+      
+      if (result.success) {
+        setUploadProgress(100)
+        
+        // Reset form
+        setRecordedBlob(null)
+        setNotes('')
+        setRecordingTime(0)
+        setLocation(null)
+        setError(null)
+        
+        alert('Encounter saved successfully!')
+      } else {
+        setError('Failed to save encounter: ' + result.error)
+      }
+    } catch (error) {
+      console.error('Error saving encounter:', error)
+      setError('Failed to save encounter: ' + error.message)
+    } finally {
+      setIsUploading(false)
+      setUploadProgress(0)
+    }
   }
 
   const formatTime = (seconds) => {
@@ -168,6 +241,42 @@ const IncidentRecorder = () => {
                   controls 
                   className="w-full mt-2 rounded"
                 />
+              </div>
+            )}
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-md p-4">
+                <div className="flex items-center gap-2 text-red-800">
+                  <AlertCircle size={16} />
+                  <p className="font-medium">{error}</p>
+                </div>
+              </div>
+            )}
+
+            {isUploading && (
+              <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+                <div className="flex items-center gap-2 text-blue-800 mb-2">
+                  <Upload size={16} />
+                  <p className="font-medium">Uploading to secure storage...</p>
+                </div>
+                <div className="w-full bg-blue-200 rounded-full h-2">
+                  <div 
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-sm text-blue-600 mt-1">{uploadProgress}% complete</p>
+              </div>
+            )}
+
+            {!canCreateEncounter() && !hasPremiumAccess() && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4">
+                <div className="flex items-center gap-2 text-yellow-800">
+                  <AlertCircle size={16} />
+                  <p className="font-medium">
+                    Free plan limit reached. Upgrade to Premium for unlimited recordings.
+                  </p>
+                </div>
               </div>
             )}
           </div>

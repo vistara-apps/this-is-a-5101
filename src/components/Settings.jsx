@@ -14,11 +14,14 @@ const Settings = () => {
     updates: false
   })
 
-  const handleUpgrade = () => {
-    // In a real app, this would integrate with Stripe
+  const handleUpgrade = async () => {
     if (confirm('Upgrade to Premium for $4.99/month?')) {
-      upgradeSubscription()
-      alert('Successfully upgraded to Premium!')
+      const result = await upgradeSubscription()
+      if (result.success) {
+        alert(result.message)
+      } else {
+        alert('Upgrade failed: ' + result.error)
+      }
     }
   }
 
