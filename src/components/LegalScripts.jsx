@@ -1,12 +1,79 @@
-import { useState } from 'react'
-import { Copy, Check, Play, Pause } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Copy, Check, Play, Pause, Sparkles, RefreshCw } from 'lucide-react'
 import { useLanguage } from '../contexts/LanguageContext'
+import { useUser } from '../contexts/UserContext'
+import { legalScriptService } from '../services/openaiService.js'
+import { locationDetectionService } from '../services/locationService.js'
 import InfoCard from './InfoCard'
 
 const LegalScripts = () => {
   const { t, language } = useLanguage()
+  const { user, hasPremiumAccess, apiConfigValid } = useUser()
   const [copiedScript, setCopiedScript] = useState(null)
   const [speaking, setSpeaking] = useState(null)
+  const [selectedScenario, setSelectedScenario] = useState('traffic-stop')
+  const [aiScripts, setAiScripts] = useState(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [userLocation, setUserLocation] = useState(null)
+  const [error, setError] = useState(null)
+
+  // Get user location on component mount
+  useEffect(() => {
+    if (hasPremiumAccess() && apiConfigValid) {
+      getUserLocation()
+    }
+  }, [hasPremiumAccess, apiConfigValid])
+
+  const getUserLocation = async () => {
+    try {
+      const locationResult = await locationDetectionService.getCurrentLocation()
+      if (locationResult.success) {
+        setUserLocation(locationResult.data)
+      }
+    } catch (error) {
+      console.error('Failed to get user location:', error)
+    }
+  }
+
+  const generateAIScripts = async (scenario) => {
+    if (!hasPremiumAccess() || !apiConfigValid) {
+      setError('AI-powered script generation requires Premium subscription and API configuration.')
+      return
+    }
+
+    try {
+      setIsGenerating(true)
+      setError(null)
+
+      const state = userLocation?.address?.stateCode || 'CA'
+      const userContext = {
+        location: userLocation?.address?.formattedAddress || 'Unknown',
+        previousEncounters: user.encounters?.length || 0
+      }
+
+      const result = await legalScriptService.generateScripts(
+        scenario,
+        state,
+        language,
+        userContext
+      )
+
+      if (result.success) {
+        setAiScripts(result.data)
+      } else {
+        setError('Failed to generate AI scripts: ' + result.error)
+        // Use fallback scripts
+        if (result.fallback) {
+          setAiScripts(result.fallback)
+        }
+      }
+    } catch (error) {
+      console.error('Error generating AI scripts:', error)
+      setError('Failed to generate AI scripts: ' + error.message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
 
   const scenarios = [
     {
@@ -111,6 +178,125 @@ const LegalScripts = () => {
         </p>
       </div>
 
+      {/* AI-Powered Scripts Section */}
+      {(hasPremiumAccess() && apiConfigValid) && (
+        <InfoCard variant="highlighted">
+          <div className="p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Sparkles size={20} className="text-accent" />
+                <h3 className="text-lg font-bold text-gray-800">
+                  {language === 'en' ? 'AI-Powered Legal Scripts' : 'Guiones Legales con IA'}
+                </h3>
+              </div>
+              <button
+                onClick={() => generateAIScripts(selectedScenario)}
+                disabled={isGenerating}
+                className="btn-accent text-sm flex items-center gap-2"
+              >
+                {isGenerating ? (
+                  <>
+                    <RefreshCw size={16} className="animate-spin" />
+                    {language === 'en' ? 'Generating...' : 'Generando...'}
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={16} />
+                    {language === 'en' ? 'Generate Scripts' : 'Generar Guiones'}
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                {language === 'en' ? 'Select Scenario' : 'Seleccionar Escenario'}
+              </label>
+              <select
+                value={selectedScenario}
+                onChange={(e) => setSelectedScenario(e.target.value)}
+                className="w-full p-2 border border-gray-300 rounded-md"
+              >
+                <option value="traffic-stop">{language === 'en' ? 'Traffic Stop' : 'Control de Tráfico'}</option>
+                <option value="questioning">{language === 'en' ? 'Police Questioning' : 'Interrogatorio Policial'}</option>
+                <option value="search-consent">{language === 'en' ? 'Search Consent' : 'Consentimiento de Registro'}</option>
+                <option value="arrest">{language === 'en' ? 'Arrest' : 'Arresto'}</option>
+              </select>
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-md p-3 mb-4">
+                <p className="text-red-800 text-sm">{error}</p>
+              </div>
+            )}
+
+            {userLocation && (
+              <div className="bg-blue-50 border border-blue-200 rounded-md p-3 mb-4">
+                <p className="text-blue-800 text-sm">
+                  📍 {language === 'en' ? 'Location:' : 'Ubicación:'} {userLocation.address?.formattedAddress || 'Unknown'}
+                </p>
+              </div>
+            )}
+
+            {aiScripts && (
+              <div className="space-y-3">
+                <h4 className="font-medium text-gray-800">
+                  {language === 'en' ? 'Generated Scripts:' : 'Guiones Generados:'}
+                </h4>
+                {aiScripts.scripts?.map((script, index) => (
+                  <div key={index} className="bg-white border border-gray-200 rounded-md p-4">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <p className="text-gray-800 font-medium mb-1">{script.text}</p>
+                        <p className="text-sm text-gray-600">{script.usage}</p>
+                        {script.priority === 'high' && (
+                          <span className="inline-block bg-red-100 text-red-800 text-xs px-2 py-1 rounded mt-2">
+                            {language === 'en' ? 'High Priority' : 'Alta Prioridad'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex gap-2 ml-4">
+                        <button
+                          onClick={() => speakScript(script.text, `ai-${index}`)}
+                          className="p-2 text-gray-600 hover:text-primary hover:bg-gray-50 rounded-md transition-colors"
+                        >
+                          {speaking === `ai-${index}` ? <Pause size={16} /> : <Play size={16} />}
+                        </button>
+                        <button
+                          onClick={() => copyScript(script.text, `ai-${index}`)}
+                          className="p-2 text-gray-600 hover:text-accent hover:bg-gray-50 rounded-md transition-colors"
+                        >
+                          {copiedScript === `ai-${index}` ? <Check size={16} className="text-accent" /> : <Copy size={16} />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                
+                {aiScripts.guidance && (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 mt-4">
+                    <h5 className="font-medium text-yellow-800 mb-1">
+                      {language === 'en' ? 'Guidance:' : 'Orientación:'}
+                    </h5>
+                    <p className="text-yellow-700 text-sm">{aiScripts.guidance}</p>
+                  </div>
+                )}
+
+                {aiScripts.stateSpecific && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                    <h5 className="font-medium text-blue-800 mb-1">
+                      {language === 'en' ? 'State-Specific Information:' : 'Información Específica del Estado:'}
+                    </h5>
+                    <p className="text-blue-700 text-sm">{aiScripts.stateSpecific}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </InfoCard>
+      )}
+
+      {/* Standard Scripts */}
       <div className="space-y-6">
         {scenarios.map(scenario => (
           <InfoCard key={scenario.id}>
